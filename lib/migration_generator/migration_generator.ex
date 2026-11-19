@@ -2147,8 +2147,12 @@ defmodule AshPostgres.MigrationGenerator do
     end
   end
 
+  @identity_match_keys [:name, :keys, :base_filter, :all_tenants?, :nils_distinct?, :where]
   defp do_fetch_operations(snapshot, old_snapshot, opts, acc, schema_moves) do
     attribute_operations = attribute_operations(snapshot, old_snapshot, opts, schema_moves)
+
+    attributes_renamed? =
+      Enum.any?(attribute_operations, &match?(%Operation.RenameAttribute{}, &1))
 
     {pkey_operations, attribute_operations} =
       pkey_operations(snapshot, old_snapshot, attribute_operations, opts)
@@ -2344,6 +2348,13 @@ defmodule AshPostgres.MigrationGenerator do
           !Enum.find(old_snapshot.identities, &identities_match?(&1, identity))
       end)
       |> Enum.map(fn identity ->
+        is_new_identity =
+          !Enum.any?(old_snapshot.identities, fn old_identity ->
+            old_identity.keys == identity.keys
+          end) &&
+            !old_snapshot[:empty?] &&
+            !attributes_renamed?
+
         %Operation.AddUniqueIndex{
           identity: identity,
           schema: snapshot.schema,
@@ -2355,7 +2366,7 @@ defmodule AshPostgres.MigrationGenerator do
               source in identity.keys,
               do: source
             ),
-          concurrently: opts.concurrent_indexes
+          concurrently: opts.concurrent_indexes || is_new_identity
         }
       end)
 
@@ -2437,7 +2448,6 @@ defmodule AshPostgres.MigrationGenerator do
       Map.get(left, :base_filter) == Map.get(right, :base_filter)
   end
 
-  @identity_match_keys [:name, :keys, :base_filter, :all_tenants?, :nils_distinct?, :where]
   defp identities_match?(left, right) do
     Map.take(left, @identity_match_keys) == Map.take(right, @identity_match_keys)
   end

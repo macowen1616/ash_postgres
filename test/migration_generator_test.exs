@@ -896,7 +896,7 @@ defmodule AshPostgres.MigrationGeneratorTest do
       )
 
       assert [first_migration, second_migration] =
-               Enum.sort(Path.wildcard("#{migration_path}/**/*.exs"))
+               Enum.sort(Path.wildcard("#{migration_path}/*.exs"))
                |> Enum.reject(&String.contains?(&1, "extensions"))
 
       first_contents = File.read!(first_migration)
@@ -912,8 +912,11 @@ defmodule AshPostgres.MigrationGeneratorTest do
         |> Path.basename(".exs")
         |> then(&Regex.replace(~r/^\d+_/, &1, ""))
 
-      assert [_, first_module] = Regex.run(~r/^defmodule\s+(.+)\s+do$/m, first_contents)
-      assert [_, second_module] = Regex.run(~r/^defmodule\s+(.+)\s+do$/m, second_contents)
+      assert [_, first_module] =
+               Regex.run(~r/^defmodule\s+(.+)\s+do\r?$/m, first_contents)
+
+      assert [_, second_module] =
+               Regex.run(~r/^defmodule\s+(.+)\s+do\r?$/m, second_contents)
 
       # Split migrations still need unique derived names and modules, even
       # when the generation run uses an explicit `name`.
@@ -2414,7 +2417,7 @@ defmodule AshPostgres.MigrationGeneratorTest do
         auto_name: true
       )
 
-      assert [file1, file2] =
+      assert [file1, file2, file3] =
                Enum.sort(Path.wildcard("#{migration_path}/**/*_migrate_resources*.exs"))
                |> Enum.reject(&String.contains?(&1, "extensions"))
 
@@ -2429,10 +2432,12 @@ defmodule AshPostgres.MigrationGeneratorTest do
                "drop_if_exists unique_index(:posts, [:title], name: \"posts_title_index\")"
 
       assert file2_content =~
-               "create unique_index(:posts, [:name], name: \"posts_unique_name_index\")"
-
-      assert file2_content =~
                "create unique_index(:posts, [:title], name: \"posts_unique_title_index\")"
+
+      file3_content = File.read!(file3)
+
+      assert file3_content =~
+               "create unique_index(:posts, [:name], name: \"posts_unique_name_index\", concurrently: true)"
     end
 
     test "when concurrent-indexes flag set to true, identities are added in separate migration",
@@ -2474,6 +2479,65 @@ defmodule AshPostgres.MigrationGeneratorTest do
 
       assert file3_content =~
                "create unique_index(:posts, [:name], name: \"posts_unique_name_index\", concurrently: true)"
+    end
+
+    test "new identities on existing tables are added concurrently", %{
+      snapshot_path: snapshot_path,
+      migration_path: migration_path
+    } do
+      # First version: create the table without an identity
+      defposts do
+        attributes do
+          uuid_primary_key(:id)
+          attribute(:title, :string, public?: true)
+        end
+      end
+
+      defdomain([Post])
+
+      AshPostgres.MigrationGenerator.generate(Domain,
+        snapshot_path: snapshot_path,
+        migration_path: migration_path,
+        quiet: true,
+        format: false,
+        auto_name: true
+      )
+
+      # Second version: add an identity to the existing table
+      defposts do
+        attributes do
+          uuid_primary_key(:id)
+          attribute(:title, :string, public?: true)
+        end
+
+        identities do
+          identity(:unique_title, [:title])
+        end
+      end
+
+      defdomain([Post])
+
+      AshPostgres.MigrationGenerator.generate(Domain,
+        snapshot_path: snapshot_path,
+        migration_path: migration_path,
+        quiet: true,
+        format: false,
+        auto_name: true
+      )
+
+      migration_files =
+        Enum.sort(Path.wildcard("#{migration_path}/**/*_migrate_resources*.exs"))
+        |> Enum.reject(&String.contains?(&1, "extensions"))
+
+      assert length(migration_files) == 3
+
+      third_migration = File.read!(Enum.at(migration_files, 2))
+
+      assert third_migration =~ ~S[@disable_ddl_transaction true]
+      assert third_migration =~ ~S[@disable_migration_lock true]
+
+      assert third_migration =~
+               "create unique_index(:posts, [:title], name: \"posts_unique_title_index\", concurrently: true)"
     end
 
     test "when an attribute exists only on some of the resources that use the same table, it isn't marked as null: false",
